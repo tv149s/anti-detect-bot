@@ -1,4 +1,8 @@
 const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-software-rasterizer');
+
 const path = require('path');
 const fs = require('fs');
 const { chromium } = require('playwright-extra');
@@ -11,13 +15,130 @@ let mainWindow;
 const trajectoriesDir = path.join(app.getPath('userData'), 'trajectories');
 const defaultProfileDir = path.join(app.getPath('userData'), 'chrome_profile');
 const settingsFile = path.join(app.getPath('userData'), 'auto_settings.json');
+const profileUrlsFile = path.join(app.getPath('userData'), 'profile-url-map.json');
+const legacyProfileUrlsFile = path.join(app.getPath('userData'), 'profile_urls.json');
+
+function normalizeUrl(urlStr) {
+  if (!urlStr) return 'about:blank';
+  return urlStr.startsWith('http') ? urlStr : 'https://' + urlStr;
+}
+
+function getProfileNameFromUrl(urlStr) {
+  const urlObj = new URL(normalizeUrl(urlStr));
+  return urlObj.hostname.replace(/[^a-zA-Z0-9]/g, '_').replace(/_/g, '.');
+}
+
+function getProfileDirFromName(profileName) {
+  return path.join(app.getPath('userData'), `profile_${profileName.replace(/\./g, '_')}`);
+}
+
+function readProfileUrls() {
+  try {
+    if (fs.existsSync(profileUrlsFile)) return JSON.parse(fs.readFileSync(profileUrlsFile, 'utf8'));
+    if (fs.existsSync(legacyProfileUrlsFile)) {
+      const profileUrls = JSON.parse(fs.readFileSync(legacyProfileUrlsFile, 'utf8'));
+      fs.writeFileSync(profileUrlsFile, JSON.stringify(profileUrls, null, 2), 'utf8');
+      fs.rmSync(legacyProfileUrlsFile, { force: true });
+      return profileUrls;
+    }
+  } catch (e) {}
+  return {};
+}
+
+function saveProfileUrl(profileName, url) {
+  const profileUrls = readProfileUrls();
+  profileUrls[profileName] = normalizeUrl(url);
+  fs.writeFileSync(profileUrlsFile, JSON.stringify(profileUrls, null, 2), 'utf8');
+}
+
+function getProfileStartUrl(profileName) {
+  const profileUrls = readProfileUrls();
+  return profileUrls[profileName] || `https://${profileName}`;
+}
+
+async function openProfileStartPage(page, profileName) {
+  const startUrl = getProfileStartUrl(profileName);
+  await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((err) => {
+    sendLog(`Navigation warning for ${profileName}: ${err.message}`);
+  });
+  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(3000).catch(() => {});
+  return startUrl;
+}
+
+async function waitForPageReady(page) {
+  await page.waitForLoadState('domcontentloaded', { timeout: 30000 }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+  await page.waitForTimeout(2000).catch(() => {});
+}
+
+async function reloadPlaybackPage(page, profileName) {
+  const currentUrl = await page.evaluate(() => location.href).catch(() => '');
+  const targetUrl = currentUrl && currentUrl !== 'about:blank' ? currentUrl : getProfileStartUrl(profileName);
+  sendLog(`No new page content detected. Reloading: ${targetUrl}`);
+  await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch((err) => {
+    sendLog(`Reload warning for ${profileName}: ${err.message}`);
+  });
+  await waitForPageReady(page);
+}
+
+async function getPageContentMetrics(page) {
+  return page.evaluate(() => {
+    const text = document.body ? document.body.innerText || '' : '';
+    const scroller = document.scrollingElement || document.documentElement || document.body;
+    const mediaCount = Array.from(document.querySelectorAll('img, video, source'))
+      .filter((el) => el.currentSrc || el.src || el.getAttribute('src')).length;
+    return {
+      href: location.href,
+      title: document.title,
+      textLength: text.length,
+      nodeCount: document.getElementsByTagName('*').length,
+      scrollHeight: scroller ? scroller.scrollHeight : 0,
+      clientHeight: scroller ? scroller.clientHeight : 0,
+      mediaCount
+    };
+  }).catch(() => null);
+}
+
+function didPageContentGrow(previous, current) {
+  if (!previous || !current) return true;
+  if (previous.href !== current.href || previous.title !== current.title) return true;
+  return current.scrollHeight > previous.scrollHeight + 80 ||
+    current.nodeCount > previous.nodeCount + 10 ||
+    current.textLength > previous.textLength + 300 ||
+    current.mediaCount > previous.mediaCount + 3;
+}
+
+function isTargetClosedError(err) {
+  return err && /Target page, context or browser has been closed|has been closed|Context closed/i.test(err.message || String(err));
+}
+
+function isPageClosed(page) {
+  try {
+    return !page || page.isClosed();
+  } catch (e) {
+    return true;
+  }
+}
+
+async function closeContextIfOpen(context) {
+  try {
+    await context.close();
+  } catch (err) {
+    if (!isTargetClosedError(err)) throw err;
+  }
+}
+
+async function replayWheelEvent(page, ev) {
+  const deltaX = ev.deltaX || 0;
+  const deltaY = ev.deltaY || 0;
+  await page.mouse.wheel(deltaX, deltaY);
+}
 
 function getProfileDir(urlStr) {
   try {
     if (!urlStr) return defaultProfileDir;
-    const urlObj = new URL(urlStr.startsWith('http') ? urlStr : 'https://' + urlStr);
-    const domain = urlObj.hostname.replace(/[^a-zA-Z0-9]/g, '_');
-    return path.join(app.getPath('userData'), `profile_${domain}`);
+    return getProfileDirFromName(getProfileNameFromUrl(urlStr));
   } catch (e) {
     return defaultProfileDir;
   }
@@ -26,8 +147,6 @@ function getProfileDir(urlStr) {
 if (!fs.existsSync(trajectoriesDir)) {
   fs.mkdirSync(trajectoriesDir, { recursive: true });
 }
-
-app.disableHardwareAcceleration();
 
 function sendLog(msg) {
   const tsMsg = `[${new Date().toLocaleTimeString()}] ${msg}`;
@@ -82,7 +201,10 @@ ipcMain.handle('get-profiles', () => {
   const userDataPath = app.getPath('userData');
   if (!fs.existsSync(userDataPath)) return [];
   return fs.readdirSync(userDataPath)
-    .filter(f => f.startsWith('profile_'))
+    .filter(f => {
+      if (!f.startsWith('profile_')) return false;
+      return fs.statSync(path.join(userDataPath, f)).isDirectory();
+    })
     .map(f => f.replace('profile_', '').replace(/_/g, '.'));
 });
 
@@ -146,7 +268,10 @@ ipcMain.handle('save-settings', (event, s) => {
 // ==== 1. Init (Login phase) ====
 ipcMain.handle('init-profile', async (event, startUrl) => {
   try {
-    const pDir = getProfileDir(startUrl);
+    const normalizedStartUrl = normalizeUrl(startUrl);
+    const pDir = getProfileDir(normalizedStartUrl);
+    const profileName = getProfileNameFromUrl(startUrl);
+    saveProfileUrl(profileName, normalizedStartUrl);
     const context = await chromium.launchPersistentContext(pDir, {
       headless: false, channel: 'chrome', viewport: { width: 1280, height: 800 },
       args: ['--disable-blink-features=AutomationControlled', '--disable-features=IsolateOrigins,site-per-process', '--disable-infobars', '--no-sandbox', '--disable-setuid-sandbox'],
@@ -154,16 +279,16 @@ ipcMain.handle('init-profile', async (event, startUrl) => {
     });
 
     const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
-    if (startUrl && startUrl !== 'about:blank') {
-      await page.goto(startUrl, {waitUntil: 'domcontentloaded'}).catch(()=>{});
+    if (normalizedStartUrl && normalizedStartUrl !== 'about:blank') {
+      await page.goto(normalizedStartUrl, {waitUntil: 'domcontentloaded'}).catch(()=>{});
     }
 
     return new Promise((resolve) => {
       context.on('close', () => {
-        const lastUrl = page.isClosed() ? startUrl : page.url();
+        const lastUrl = page.isClosed() ? normalizedStartUrl : page.url();
         fs.writeFileSync(path.join(app.getPath('userData'), 'lastURL.txt'), lastUrl, 'utf8');
         sendLog('Init phase closed.');
-        resolve({ success: true, url: lastUrl });
+        resolve({ success: true, url: lastUrl, profileName });
       });
     });
   } catch (err) {
@@ -174,9 +299,9 @@ ipcMain.handle('init-profile', async (event, startUrl) => {
 
 
 // ==== 2. Record ====
-ipcMain.handle('record', async (event, profileDomain, startUrl) => {
+ipcMain.handle('record', async (event, profileDomain) => {
   try {
-    const pDir = path.join(app.getPath('userData'), `profile_${profileDomain.replace(/\./g, '_')}`);
+    const pDir = getProfileDirFromName(profileDomain);
     const context = await chromium.launchPersistentContext(pDir, {
       headless: false, channel: 'chrome', viewport: { width: 1280, height: 800 },
       args: ['--disable-blink-features=AutomationControlled', '--disable-features=IsolateOrigins,site-per-process', '--disable-infobars', '--no-sandbox'],
@@ -217,7 +342,7 @@ ipcMain.handle('record', async (event, profileDomain, startUrl) => {
       window.addEventListener('keyup',     (e) => record('keyup',     {key: e.key}), { passive: true });
     });
 
-    await page.goto(startUrl).catch(()=>{});
+    await openProfileStartPage(page, profileDomain);
 
     return new Promise((resolve) => {
       context.on('close', async () => {
@@ -255,7 +380,7 @@ ipcMain.handle('record', async (event, profileDomain, startUrl) => {
 
 
 // ==== 3. Replay ====
-ipcMain.handle('replay', async (event, profileDomain, targetUrl) => {
+ipcMain.handle('replay', async (event, profileDomain) => {
   try {
     const openResult = await dialog.showOpenDialog(mainWindow, {
       title: 'Select Trajectory File', defaultPath: trajectoriesDir,
@@ -267,10 +392,10 @@ ipcMain.handle('replay', async (event, profileDomain, targetUrl) => {
     
     fs.writeFileSync(path.join(app.getPath('userData'), 'lastTrajectory.txt'), trajectoryFile, 'utf8');
 
-    sendLog(`Starting replay manually: ${path.basename(trajectoryFile)} using profile ${profileDomain} on ${targetUrl}`);
+    sendLog(`Starting replay manually: ${path.basename(trajectoryFile)} using profile ${profileDomain}`);
     
     const data = JSON.parse(fs.readFileSync(trajectoryFile, 'utf-8'));
-    const pDir = path.join(app.getPath('userData'), `profile_${profileDomain.replace(/\./g, '_')}`);
+    const pDir = getProfileDirFromName(profileDomain);
 
     // Manual replay manages its own context lifecycle
     const context = await chromium.launchPersistentContext(pDir, {
@@ -283,11 +408,11 @@ ipcMain.handle('replay', async (event, profileDomain, targetUrl) => {
     const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
     
     await page.addInitScript(() => { window.addEventListener('DOMContentLoaded', () => {}); });
-    await page.goto(targetUrl, { waitUntil: 'load' }).catch(()=>{});
+    await openProfileStartPage(page, profileDomain);
 
-    const playedEvents = await executePlaybackCycle(data, page, context, false);
+    const playedEvents = await executePlaybackCycle(data, page, context, false, 0, profileDomain);
     
-    await context.close();
+    await closeContextIfOpen(context);
 
     return { success: true, played: playedEvents, filePath: trajectoryFile };
   } catch (err) {
@@ -298,10 +423,16 @@ ipcMain.handle('replay', async (event, profileDomain, targetUrl) => {
 
 
 // ==== Playback Engine ====
-async function executePlaybackCycle(data, page, context, enforceEndTime, endTimeMs = 0) {
+async function executePlaybackCycle(data, page, context, enforceEndTime, endTimeMs = 0, profileName = null) {
   let eventsPlayed = 0;
+  let wheelAccumulator = 0;
+  let lastContentMetrics = await getPageContentMetrics(page);
+  let lastContentCheckTime = Date.now();
+  let hadNavigationSinceContentCheck = false;
+  const isTikTok = await page.evaluate(() => location.hostname.includes('tiktok.com')).catch(() => false);
+  const contentCheckIntervalMs = 30000;
   for (let i = 0; i < data.events.length; i++) {
-      if (context.isClosed() || !mainWindow) break;
+      if (isPageClosed(page) || !mainWindow) break;
       if (enforceEndTime && Date.now() >= endTimeMs) break;
 
       const ev = data.events[i];
@@ -309,8 +440,17 @@ async function executePlaybackCycle(data, page, context, enforceEndTime, endTime
 
       if (prevEv) {
         const waitTime = ev.time - prevEv.time;
-        if (waitTime > 0 && waitTime < 30000) await page.waitForTimeout(waitTime);
+        if (waitTime > 0 && waitTime < 30000) {
+          try {
+            await page.waitForTimeout(waitTime);
+          } catch (err) {
+            if (isTargetClosedError(err)) break;
+            throw err;
+          }
+        }
       }
+
+      if (isPageClosed(page)) break;
 
       try {
         if (ev.type === 'mousemove') {
@@ -331,11 +471,36 @@ async function executePlaybackCycle(data, page, context, enforceEndTime, endTime
           await page.mouse.click(ev.x, ev.y);
         } else if (ev.type === 'mousedown') { await page.mouse.down();
         } else if (ev.type === 'mouseup') { await page.mouse.up();
-        } else if (ev.type === 'wheel') { await page.mouse.wheel(ev.deltaX, ev.deltaY);
+        } else if (ev.type === 'wheel') {
+          hadNavigationSinceContentCheck = true;
+          if (isTikTok) {
+            wheelAccumulator += ev.deltaY || 0;
+            if (Math.abs(wheelAccumulator) >= 450) {
+              await page.keyboard.press(wheelAccumulator > 0 ? 'ArrowDown' : 'ArrowUp').catch(() => {});
+              wheelAccumulator = 0;
+            }
+          } else {
+            await replayWheelEvent(page, ev);
+          }
         } else if (ev.type === 'keydown') { await page.keyboard.down(ev.key);
         } else if (ev.type === 'keyup') { await page.keyboard.up(ev.key); }
-      } catch (err) {}
+      } catch (err) {
+        if (isTargetClosedError(err)) break;
+      }
       eventsPlayed++;
+
+      if (profileName && hadNavigationSinceContentCheck && Date.now() - lastContentCheckTime >= contentCheckIntervalMs && !isPageClosed(page)) {
+        const nextContentMetrics = await getPageContentMetrics(page);
+        if (!didPageContentGrow(lastContentMetrics, nextContentMetrics)) {
+          await reloadPlaybackPage(page, profileName);
+          lastContentMetrics = await getPageContentMetrics(page);
+        } else {
+          lastContentMetrics = nextContentMetrics;
+        }
+
+        lastContentCheckTime = Date.now();
+        hadNavigationSinceContentCheck = false;
+      }
   }
 
   return eventsPlayed;
@@ -395,7 +560,7 @@ async function runAutoPlayLoop(trajectoryFile, durationMins) {
     let context;
     try {
         const data = JSON.parse(fs.readFileSync(trajectoryFile, 'utf-8'));
-        const pDir = path.join(app.getPath('userData'), `profile_${autoPlayProfile.replace(/\./g, '_')}`);
+        const pDir = getProfileDirFromName(autoPlayProfile);
         
         // Single browser launch for the entire autoplay duration
         context = await chromium.launchPersistentContext(pDir, {
@@ -407,17 +572,17 @@ async function runAutoPlayLoop(trajectoryFile, durationMins) {
         const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
         
         await page.addInitScript(() => { window.addEventListener('DOMContentLoaded', () => {}); });
-        await page.goto(autoPlayUrl, { waitUntil: 'load' }).catch(()=>{});
+        await openProfileStartPage(page, autoPlayProfile);
 
         let loopCount = 0;
         while (Date.now() < endTimeMs && isAutoPlaying && mainWindow) {
             loopCount++;
             sendLog(`[AutoPlay] Starting cycle #${loopCount}`);
-            await executePlaybackCycle(data, page, context, true, endTimeMs);
+            await executePlaybackCycle(data, page, context, true, endTimeMs, autoPlayProfile);
             
             // Wait briefly before starting the next loop cycle
-            if (Date.now() < endTimeMs && isAutoPlaying && !context.isClosed()) {
-                await page.waitForTimeout(3000); 
+            if (Date.now() < endTimeMs && isAutoPlaying && !isPageClosed(page)) {
+              await page.waitForTimeout(3000).catch(() => {}); 
             }
         }
         
@@ -425,15 +590,14 @@ async function runAutoPlayLoop(trajectoryFile, durationMins) {
         sendLog(`[AutoPlay] Fatal loop error: ` + err);
     } finally {
         sendLog(`[AutoPlay] Limit reached. Closing browser.`);
-        if (context && !context.isClosed()) await context.close();
+        if (context) await closeContextIfOpen(context);
         loopTaskActive = false;
     }
 }
 
 let autoPlayProfile = null;
-let autoPlayUrl = null;
 
-ipcMain.handle('toggle-auto-play', async (e, filePath, profileDomain, targetUrl) => {
+ipcMain.handle('toggle-auto-play', async (e, filePath, profileDomain) => {
    if (isAutoPlaying) {
        isAutoPlaying = false;
        if (autoPlayTimer) clearInterval(autoPlayTimer);
@@ -443,11 +607,10 @@ ipcMain.handle('toggle-auto-play', async (e, filePath, profileDomain, targetUrl)
        isAutoPlaying = true;
        autoPlayFile = filePath;
        autoPlayProfile = profileDomain;
-       autoPlayUrl = targetUrl;
        lastScheduledDate = null; 
        checkSchedule(); 
        autoPlayTimer = setInterval(checkSchedule, 30000); 
-       sendLog(`Auto Play Enabled for: ${path.basename(filePath)} using profile ${profileDomain} on ${targetUrl}`);
+           sendLog(`Auto Play Enabled for: ${path.basename(filePath)} using profile ${profileDomain}`);
        return true; 
    }
 });

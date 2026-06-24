@@ -40,11 +40,6 @@
   <div class="container">
     <h2>Human Simulator</h2>
     
-    <div class="form-group">
-      <label>Target URL:</label>
-      <input type="text" id="url-input" placeholder="e.g. facebook.com" spellcheck="false" autocomplete="off">
-    </div>
-
     <button id="btn-init">Step 1. Initialize Profile (Login)</button>
     <div class="step-text">Opens browser for you to log in securely.</div>
 
@@ -75,6 +70,21 @@
 
   <div style="text-align: center; margin-top: 15px; font-size: 12px; color: #888;">
     Powered by <strong>AIfindCar.com</strong>
+  </div>
+
+  <!-- Step 1 URL Modal -->
+  <div id="init-url-modal" class="modal-overlay">
+    <div class="modal-content">
+      <h3 style="margin-top: 0; border-bottom: 1px solid #eee; padding-bottom: 10px;">Initialize Login Profile</h3>
+
+      <label style="display: block; margin-bottom: 5px;">Website URL</label>
+      <input type="text" id="init-url-input" style="margin-bottom: 15px;" placeholder="https://facebook.com" spellcheck="false" autocomplete="off">
+
+      <div style="display: flex; gap: 10px; margin-top: 20px;">
+        <button id="btn-start-init" style="background: #1a73e8; color: white; padding: 10px; margin: 0;">Start Login</button>
+        <button id="btn-cancel-init" style="background: #ccc; color: #333; padding: 10px; margin: 0;">Cancel</button>
+      </div>
+    </div>
   </div>
 
   <!-- Settings Modal -->
@@ -112,7 +122,6 @@
   <script>
     const { ipcRenderer } = require('electron');
 
-    const urlInput = document.getElementById('url-input');
     const btnInit = document.getElementById('btn-init');
     const btnRecord = document.getElementById('btn-record');
     const btnReplay = document.getElementById('btn-replay');
@@ -121,13 +130,17 @@
     const statusDiv = document.getElementById('status');
     const logSummary = document.getElementById('log-summary');
     const logList = document.getElementById('log-list');
+    const initUrlModal = document.getElementById('init-url-modal');
+    const initUrlInput = document.getElementById('init-url-input');
+    const btnStartInit = document.getElementById('btn-start-init');
+    const btnCancelInit = document.getElementById('btn-cancel-init');
 
     let lastRecordedOrPlayedFile = null;
     let autoPlayActive = false;
 
     function setStatus(msg) { statusDiv.textContent = msg; }
     
-    function loadProfiles() {
+    function loadProfiles(selectedProfileName = null) {
       ipcRenderer.invoke('get-profiles').then(profiles => {
          const container = document.getElementById('profiles-container');
          container.innerHTML = '';
@@ -141,7 +154,7 @@
                rdo.name = 'targetProfile';
                rdo.value = p;
                rdo.style.marginRight = '5px';
-               if(index === 0) rdo.checked = true;
+               if((selectedProfileName && p === selectedProfileName) || (!selectedProfileName && index === 0)) rdo.checked = true;
                lbl.appendChild(rdo);
                lbl.append(p);
 
@@ -184,8 +197,6 @@
       return url;
     }
 
-    ipcRenderer.invoke('get-last-url').then(url => { if(url) urlInput.value = url; });
-
     loadProfiles();
 
     ipcRenderer.invoke('check-initial-state').then(state => {
@@ -203,16 +214,29 @@
       }
     });
 
-    btnInit.addEventListener('click', async () => {
-      let url = formatUrl(urlInput.value.trim());
+    btnInit.addEventListener('click', () => {
+      initUrlInput.value = initUrlInput.value || 'https://facebook.com';
+      initUrlModal.style.display = 'flex';
+      initUrlInput.focus();
+      initUrlInput.select();
+    });
+
+    btnCancelInit.addEventListener('click', () => {
+      initUrlModal.style.display = 'none';
+    });
+
+    btnStartInit.addEventListener('click', async () => {
+      const enteredUrl = initUrlInput.value.trim();
+      if (!enteredUrl) return alert('Please enter a website URL first.');
+      const url = formatUrl(enteredUrl);
+      initUrlModal.style.display = 'none';
       btnInit.disabled = true;
       setStatus('Initializing browser... Please login and close the browser when ready.');
       const res = await ipcRenderer.invoke('init-profile', url);
       btnInit.disabled = false;
       if (res.success) {
-        if (res.url && res.url !== 'about:blank') urlInput.value = res.url;
         setStatus('Profile saved successfully! You can now record.');
-        loadProfiles();
+        loadProfiles(res.profileName);
         btnRecord.disabled = false;
       } else setStatus('Error: ' + res.error);
     });
@@ -220,14 +244,11 @@
     btnRecord.addEventListener('click', async () => {
       const selectedProfile = document.querySelector('input[name="targetProfile"]:checked')?.value;
       if (!selectedProfile) return alert('Please complete Step 1 (Initialize) first to create a profile environment.');
-      
-      let url = urlInput.value.trim();
-      if (!url) return alert('Please enter a URL first');
-      url = formatUrl(url);
+
       btnRecord.disabled = true; btnInit.disabled = true;
       setStatus(`Recording under environment [${selectedProfile}]...`);
       
-      const res = await ipcRenderer.invoke('record', selectedProfile, url);
+      const res = await ipcRenderer.invoke('record', selectedProfile);
       btnRecord.disabled = false; btnInit.disabled = false;
       if (res.success) {
         lastRecordedOrPlayedFile = res.savedPath;
@@ -244,13 +265,9 @@
       const selectedProfile = document.querySelector('input[name="targetProfile"]:checked')?.value;
       if (!selectedProfile) return alert('Please select an active profile environment first.');
 
-      let url = urlInput.value.trim();
-      if (!url) return alert('Please enter a target URL first');
-      url = formatUrl(url);
-
       btnReplay.disabled = true; btnAutoPlay.disabled = true; btnSettings.disabled = true;
       setStatus('Select a file to replay...');
-      const res = await ipcRenderer.invoke('replay', selectedProfile, url);
+      const res = await ipcRenderer.invoke('replay', selectedProfile);
       btnReplay.disabled = false; 
       if (res.canceled) setStatus('Replay canceled.');
       else if (res.success) {
@@ -265,11 +282,7 @@
        const selectedProfile = document.querySelector('input[name="targetProfile"]:checked')?.value;
        if (!selectedProfile) return alert('Please select an active profile environment first.');
 
-       let url = urlInput.value.trim();
-       if (!url) return alert('Please enter a target URL first');
-       url = formatUrl(url);
-
-       const isActive = await ipcRenderer.invoke('toggle-auto-play', lastRecordedOrPlayedFile, selectedProfile, url);
+        const isActive = await ipcRenderer.invoke('toggle-auto-play', lastRecordedOrPlayedFile, selectedProfile);
        autoPlayActive = isActive;
        if (isActive) {
            btnAutoPlay.classList.add('active');
