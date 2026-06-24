@@ -1,6 +1,7 @@
 {
-  "name": "trajectory-tool",
-  "version": "1.0.0",
+  "name": "human-simulator",
+  "productName": "Human Simulator",
+  "version": "1.0.1",
   "description": "Cross-platform Trajectory Recorder and Replayer",
   "main": "src/main.js",
   "scripts": {

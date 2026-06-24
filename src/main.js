@@ -43,8 +43,12 @@ function createWindow() {
       nodeIntegration: true,
       contextIsolation: false
     },
-    title: 'Trajectory Automation Suite',
+    title: `Human Simulator v${app.getVersion()}`,
     autoHideMenuBar: true
+  });
+
+  mainWindow.on('page-title-updated', (e) => {
+    e.preventDefault();
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
@@ -89,7 +93,7 @@ ipcMain.handle('check-initial-state', () => {
     const hasProfiles = fs.readdirSync(userDataPath).some(f => f.startsWith('profile_') || f === 'chrome_profile');
     if (hasProfiles) profileExists = true;
   }
-  }
+  
   if (fs.existsSync(trajectoriesDir)) {
     const files = fs.readdirSync(trajectoriesDir).filter(f => f.endsWith('.json'));
     if (files.length > 0) {
