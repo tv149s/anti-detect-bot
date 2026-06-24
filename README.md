@@ -18,20 +18,22 @@
 
 ## 🚀 Getting Started
 
-### 1. Prerequisites
-- **Node.js** (v18+)
+### 1. Download & Install (Easiest Way)
+1. Head over to the [Releases](../../releases) tab on this repository.
+2. Download the latest `Trajectory-Recorder-Setup.exe` (or `anti-detect-bot-Setup.exe`).
+3. Double click to run. No programming knowledge required!
 
-### 2. Installation
+### 2. Run from Source (For Developers)
+- **Node.js** (v18+) required.
+
 ```bash
 git clone https://github.com/tv149s/anti-detect-bot.git
 cd anti-detect-bot
 npm install
+npm start
 ```
 
 ### 3. Usage
-```bash
-npm start
-```
 
 1. **Step 1 (Init):** Enter your target URL and click `Step 1`. A browser will open. Log into your accounts and solve any initial captchas manually. Once ready, close the browser. Your session is now saved identically.
 2. **Step 2 (Record):** Click `Start Recording`. The browser will open again. Perform your actions exactly as you want them automated. Close the browser when finished to save the `.json` trajectory file.
