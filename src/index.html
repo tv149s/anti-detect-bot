@@ -48,6 +48,11 @@
     <button id="btn-init">Step 1. Initialize Profile (Login)</button>
     <div class="step-text">Opens browser for you to log in securely.</div>
 
+    <div id="profile-list" style="display:none; margin-bottom: 15px; padding: 10px; background: #e8f0fe; border-radius: 4px; border: 1px solid #c6dafc;">
+       <div style="font-size: 13px; font-weight: bold; margin-bottom: 5px; color: #1a73e8;">Selected Environment:</div>
+       <div id="profiles-container" style="display: flex; gap: 10px; font-size: 13px; flex-wrap: wrap;"></div>
+    </div>
+
     <button id="btn-record" disabled>Step 2. Start Recording</button>
     <div class="step-text">Records your actions into a JSON file.</div>
 
@@ -122,6 +127,29 @@
 
     function setStatus(msg) { statusDiv.textContent = msg; }
     
+    function loadProfiles() {
+      ipcRenderer.invoke('get-profiles').then(profiles => {
+         const container = document.getElementById('profiles-container');
+         container.innerHTML = '';
+         if(profiles.length > 0) {
+            document.getElementById('profile-list').style.display = 'block';
+            profiles.forEach((p, index) => {
+               const lbl = document.createElement('label');
+               lbl.style.cursor = 'pointer';
+               const rdo = document.createElement('input');
+               rdo.type = 'radio';
+               rdo.name = 'targetProfile';
+               rdo.value = p;
+               rdo.style.marginRight = '5px';
+               if(index === 0) rdo.checked = true;
+               lbl.appendChild(rdo);
+               lbl.append(p);
+               container.appendChild(lbl);
+            });
+         }
+      });
+    }
+
     ipcRenderer.on('log-message', (e, msg) => {
        const li = document.createElement('li');
        li.textContent = msg;
@@ -137,6 +165,8 @@
     }
 
     ipcRenderer.invoke('get-last-url').then(url => { if(url) urlInput.value = url; });
+
+    loadProfiles();
 
     ipcRenderer.invoke('check-initial-state').then(state => {
       if (state.profileExists) {
@@ -162,17 +192,22 @@
       if (res.success) {
         if (res.url && res.url !== 'about:blank') urlInput.value = res.url;
         setStatus('Profile saved successfully! You can now record.');
+        loadProfiles();
         btnRecord.disabled = false;
       } else setStatus('Error: ' + res.error);
     });
 
     btnRecord.addEventListener('click', async () => {
+      const selectedProfile = document.querySelector('input[name="targetProfile"]:checked')?.value;
+      if (!selectedProfile) return alert('Please complete Step 1 (Initialize) first to create a profile environment.');
+      
       let url = urlInput.value.trim();
       if (!url) return alert('Please enter a URL first');
       url = formatUrl(url);
       btnRecord.disabled = true; btnInit.disabled = true;
-      setStatus('Recording... Perform actions in the browser and close it to save.');
-      const res = await ipcRenderer.invoke('record', url);
+      setStatus(`Recording under environment [${selectedProfile}]...`);
+      
+      const res = await ipcRenderer.invoke('record', selectedProfile, url);
       btnRecord.disabled = false; btnInit.disabled = false;
       if (res.success) {
         lastRecordedOrPlayedFile = res.savedPath;
@@ -186,9 +221,12 @@
     });
 
     btnReplay.addEventListener('click', async () => {
+      const selectedProfile = document.querySelector('input[name="targetProfile"]:checked')?.value;
+      if (!selectedProfile) return alert('Please select an active profile environment first.');
+
       btnReplay.disabled = true; btnAutoPlay.disabled = true; btnSettings.disabled = true;
       setStatus('Select a file to replay...');
-      const res = await ipcRenderer.invoke('replay');
+      const res = await ipcRenderer.invoke('replay', selectedProfile);
       btnReplay.disabled = false; 
       if (res.canceled) setStatus('Replay canceled.');
       else if (res.success) {
@@ -200,7 +238,10 @@
 
     // Auto Play UI Logic
     btnAutoPlay.addEventListener('click', async () => {
-       const isActive = await ipcRenderer.invoke('toggle-auto-play', lastRecordedOrPlayedFile);
+       const selectedProfile = document.querySelector('input[name="targetProfile"]:checked')?.value;
+       if (!selectedProfile) return alert('Please select an active profile environment first.');
+
+       const isActive = await ipcRenderer.invoke('toggle-auto-play', lastRecordedOrPlayedFile, selectedProfile);
        autoPlayActive = isActive;
        if (isActive) {
            btnAutoPlay.classList.add('active');

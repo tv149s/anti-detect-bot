@@ -71,6 +71,14 @@ ipcMain.handle('get-last-url', () => {
   return '';
 });
 
+ipcMain.handle('get-profiles', () => {
+  const userDataPath = app.getPath('userData');
+  if (!fs.existsSync(userDataPath)) return [];
+  return fs.readdirSync(userDataPath)
+    .filter(f => f.startsWith('profile_'))
+    .map(f => f.replace('profile_', '').replace(/_/g, '.'));
+});
+
 ipcMain.handle('check-initial-state', () => {
   let profileExists = false;
   let trajectoriesExist = false;
@@ -144,9 +152,9 @@ ipcMain.handle('init-profile', async (event, startUrl) => {
 
 
 // ==== 2. Record ====
-ipcMain.handle('record', async (event, startUrl) => {
+ipcMain.handle('record', async (event, profileDomain, startUrl) => {
   try {
-    const pDir = getProfileDir(startUrl);
+    const pDir = path.join(app.getPath('userData'), `profile_${profileDomain.replace(/\./g, '_')}`);
     const context = await chromium.launchPersistentContext(pDir, {
       headless: false, channel: 'chrome', viewport: { width: 1280, height: 800 },
       args: ['--disable-blink-features=AutomationControlled', '--disable-features=IsolateOrigins,site-per-process', '--disable-infobars', '--no-sandbox'],
@@ -195,10 +203,11 @@ ipcMain.handle('record', async (event, startUrl) => {
         let targetFilePath = '';
         if (events.length > 0) {
           const dateStr = new Date().toISOString().slice(0,10).replace(/-/g,'');
+          const prefix = profileDomain.replace(/[^a-zA-Z0-9]/g, '');
           
           let count = 1;
-          while(fs.existsSync(path.join(trajectoriesDir, `data${dateStr}-${count}.json`))) count++;
-          const defaultName = `data${dateStr}-${count}.json`;
+          while(fs.existsSync(path.join(trajectoriesDir, `${prefix}-data${dateStr}-${count}.json`))) count++;
+          const defaultName = `${prefix}-data${dateStr}-${count}.json`;
 
           const result = await dialog.showSaveDialog(mainWindow, {
             title: 'Save Trajectory',
@@ -225,7 +234,7 @@ ipcMain.handle('record', async (event, startUrl) => {
 
 
 // ==== 3. Replay ====
-ipcMain.handle('replay', async () => {
+ipcMain.handle('replay', async (event, profileDomain) => {
   try {
     const openResult = await dialog.showOpenDialog(mainWindow, {
       title: 'Select Trajectory File', defaultPath: trajectoriesDir,
@@ -237,10 +246,10 @@ ipcMain.handle('replay', async () => {
     
     fs.writeFileSync(path.join(app.getPath('userData'), 'lastTrajectory.txt'), trajectoryFile, 'utf8');
 
-    sendLog(`Starting replay manually: ${path.basename(trajectoryFile)}`);
+    sendLog(`Starting replay manually: ${path.basename(trajectoryFile)} using profile ${profileDomain}`);
     
     const data = JSON.parse(fs.readFileSync(trajectoryFile, 'utf-8'));
-    const pDir = getProfileDir(data.url);
+    const pDir = path.join(app.getPath('userData'), `profile_${profileDomain.replace(/\./g, '_')}`);
 
     // Manual replay manages its own context lifecycle
     const context = await chromium.launchPersistentContext(pDir, {
@@ -365,7 +374,7 @@ async function runAutoPlayLoop(trajectoryFile, durationMins) {
     let context;
     try {
         const data = JSON.parse(fs.readFileSync(trajectoryFile, 'utf-8'));
-        const pDir = getProfileDir(data.url);
+        const pDir = path.join(app.getPath('userData'), `profile_${autoPlayProfile.replace(/\./g, '_')}`);
         
         // Single browser launch for the entire autoplay duration
         context = await chromium.launchPersistentContext(pDir, {
@@ -400,7 +409,9 @@ async function runAutoPlayLoop(trajectoryFile, durationMins) {
     }
 }
 
-ipcMain.handle('toggle-auto-play', async (e, filePath) => {
+let autoPlayProfile = null;
+
+ipcMain.handle('toggle-auto-play', async (e, filePath, profileDomain) => {
    if (isAutoPlaying) {
        isAutoPlaying = false;
        if (autoPlayTimer) clearInterval(autoPlayTimer);
@@ -409,10 +420,11 @@ ipcMain.handle('toggle-auto-play', async (e, filePath) => {
    } else {
        isAutoPlaying = true;
        autoPlayFile = filePath;
+       autoPlayProfile = profileDomain;
        lastScheduledDate = null; 
        checkSchedule(); 
        autoPlayTimer = setInterval(checkSchedule, 30000); 
-       sendLog(`Auto Play Enabled for: ${path.basename(filePath)}`);
+       sendLog(`Auto Play Enabled for: ${path.basename(filePath)} using profile ${profileDomain}`);
        return true; 
    }
 });
