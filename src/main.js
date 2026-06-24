@@ -27,6 +27,8 @@ if (!fs.existsSync(trajectoriesDir)) {
   fs.mkdirSync(trajectoriesDir, { recursive: true });
 }
 
+app.disableHardwareAcceleration();
+
 function sendLog(msg) {
   const tsMsg = `[${new Date().toLocaleTimeString()}] ${msg}`;
   console.log(tsMsg);
@@ -41,7 +43,8 @@ function createWindow() {
     height: 750,
     webPreferences: {
       nodeIntegration: true,
-      contextIsolation: false
+      contextIsolation: false,
+      spellcheck: false
     },
     title: `Human Simulator v${app.getVersion()}`,
     autoHideMenuBar: true
@@ -222,11 +225,10 @@ ipcMain.handle('record', async (event, profileDomain, startUrl) => {
         let targetFilePath = '';
         if (events.length > 0) {
           const dateStr = new Date().toISOString().slice(0,10).replace(/-/g,'');
-          const prefix = profileDomain.replace(/[^a-zA-Z0-9]/g, '');
           
           let count = 1;
-          while(fs.existsSync(path.join(trajectoriesDir, `${prefix}-data${dateStr}-${count}.json`))) count++;
-          const defaultName = `${prefix}-data${dateStr}-${count}.json`;
+          while(fs.existsSync(path.join(trajectoriesDir, `data${dateStr}-${count}.json`))) count++;
+          const defaultName = `data${dateStr}-${count}.json`;
 
           const result = await dialog.showSaveDialog(mainWindow, {
             title: 'Save Trajectory',
@@ -237,7 +239,7 @@ ipcMain.handle('record', async (event, profileDomain, startUrl) => {
           if (!result.canceled && result.filePath) targetFilePath = result.filePath;
           else targetFilePath = path.join(trajectoriesDir, defaultName);
 
-          const meta = { url: startUrl, eventCount: events.length, viewport: { width: 1280, height: 800 }, events: events };
+          const meta = { eventCount: events.length, viewport: { width: 1280, height: 800 }, events: events };
           fs.writeFileSync(targetFilePath, JSON.stringify(meta, null, 2), 'utf8');
           fs.writeFileSync(path.join(app.getPath('userData'), 'lastTrajectory.txt'), targetFilePath, 'utf8');
         }
@@ -253,7 +255,7 @@ ipcMain.handle('record', async (event, profileDomain, startUrl) => {
 
 
 // ==== 3. Replay ====
-ipcMain.handle('replay', async (event, profileDomain) => {
+ipcMain.handle('replay', async (event, profileDomain, targetUrl) => {
   try {
     const openResult = await dialog.showOpenDialog(mainWindow, {
       title: 'Select Trajectory File', defaultPath: trajectoriesDir,
@@ -265,7 +267,7 @@ ipcMain.handle('replay', async (event, profileDomain) => {
     
     fs.writeFileSync(path.join(app.getPath('userData'), 'lastTrajectory.txt'), trajectoryFile, 'utf8');
 
-    sendLog(`Starting replay manually: ${path.basename(trajectoryFile)} using profile ${profileDomain}`);
+    sendLog(`Starting replay manually: ${path.basename(trajectoryFile)} using profile ${profileDomain} on ${targetUrl}`);
     
     const data = JSON.parse(fs.readFileSync(trajectoryFile, 'utf-8'));
     const pDir = path.join(app.getPath('userData'), `profile_${profileDomain.replace(/\./g, '_')}`);
@@ -281,7 +283,7 @@ ipcMain.handle('replay', async (event, profileDomain) => {
     const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
     
     await page.addInitScript(() => { window.addEventListener('DOMContentLoaded', () => {}); });
-    await page.goto(data.url, { waitUntil: 'load' }).catch(()=>{});
+    await page.goto(targetUrl, { waitUntil: 'load' }).catch(()=>{});
 
     const playedEvents = await executePlaybackCycle(data, page, context, false);
     
@@ -405,7 +407,7 @@ async function runAutoPlayLoop(trajectoryFile, durationMins) {
         const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
         
         await page.addInitScript(() => { window.addEventListener('DOMContentLoaded', () => {}); });
-        await page.goto(data.url, { waitUntil: 'load' }).catch(()=>{});
+        await page.goto(autoPlayUrl, { waitUntil: 'load' }).catch(()=>{});
 
         let loopCount = 0;
         while (Date.now() < endTimeMs && isAutoPlaying && mainWindow) {
@@ -429,8 +431,9 @@ async function runAutoPlayLoop(trajectoryFile, durationMins) {
 }
 
 let autoPlayProfile = null;
+let autoPlayUrl = null;
 
-ipcMain.handle('toggle-auto-play', async (e, filePath, profileDomain) => {
+ipcMain.handle('toggle-auto-play', async (e, filePath, profileDomain, targetUrl) => {
    if (isAutoPlaying) {
        isAutoPlaying = false;
        if (autoPlayTimer) clearInterval(autoPlayTimer);
@@ -440,10 +443,11 @@ ipcMain.handle('toggle-auto-play', async (e, filePath, profileDomain) => {
        isAutoPlaying = true;
        autoPlayFile = filePath;
        autoPlayProfile = profileDomain;
+       autoPlayUrl = targetUrl;
        lastScheduledDate = null; 
        checkSchedule(); 
        autoPlayTimer = setInterval(checkSchedule, 30000); 
-       sendLog(`Auto Play Enabled for: ${path.basename(filePath)} using profile ${profileDomain}`);
+       sendLog(`Auto Play Enabled for: ${path.basename(filePath)} using profile ${profileDomain} on ${targetUrl}`);
        return true; 
    }
 });

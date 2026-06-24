@@ -42,7 +42,7 @@
     
     <div class="form-group">
       <label>Target URL:</label>
-      <input type="text" id="url-input" placeholder="e.g. facebook.com">
+      <input type="text" id="url-input" placeholder="e.g. facebook.com" spellcheck="false" autocomplete="off">
     </div>
 
     <button id="btn-init">Step 1. Initialize Profile (Login)</button>
@@ -244,9 +244,13 @@
       const selectedProfile = document.querySelector('input[name="targetProfile"]:checked')?.value;
       if (!selectedProfile) return alert('Please select an active profile environment first.');
 
+      let url = urlInput.value.trim();
+      if (!url) return alert('Please enter a target URL first');
+      url = formatUrl(url);
+
       btnReplay.disabled = true; btnAutoPlay.disabled = true; btnSettings.disabled = true;
       setStatus('Select a file to replay...');
-      const res = await ipcRenderer.invoke('replay', selectedProfile);
+      const res = await ipcRenderer.invoke('replay', selectedProfile, url);
       btnReplay.disabled = false; 
       if (res.canceled) setStatus('Replay canceled.');
       else if (res.success) {
@@ -261,7 +265,11 @@
        const selectedProfile = document.querySelector('input[name="targetProfile"]:checked')?.value;
        if (!selectedProfile) return alert('Please select an active profile environment first.');
 
-       const isActive = await ipcRenderer.invoke('toggle-auto-play', lastRecordedOrPlayedFile, selectedProfile);
+       let url = urlInput.value.trim();
+       if (!url) return alert('Please enter a target URL first');
+       url = formatUrl(url);
+
+       const isActive = await ipcRenderer.invoke('toggle-auto-play', lastRecordedOrPlayedFile, selectedProfile, url);
        autoPlayActive = isActive;
        if (isActive) {
            btnAutoPlay.classList.add('active');
