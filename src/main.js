@@ -83,6 +83,21 @@ ipcMain.handle('get-profiles', () => {
     .map(f => f.replace('profile_', '').replace(/_/g, '.'));
 });
 
+ipcMain.handle('delete-profile', (event, profileName) => {
+  try {
+    const profileFolder = 'profile_' + profileName.replace(/\./g, '_');
+    const fullPath = path.join(app.getPath('userData'), profileFolder);
+    if (fs.existsSync(fullPath)) {
+      fs.rmSync(fullPath, { recursive: true, force: true });
+      sendLog(`Profile environment deleted: ${profileName}`);
+      return true;
+    }
+  } catch(e) {
+    sendLog(`Error deleting profile: ${e.message}`);
+  }
+  return false;
+});
+
 ipcMain.handle('check-initial-state', () => {
   let profileExists = false;
   let trajectoriesExist = false;

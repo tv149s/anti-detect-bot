@@ -144,6 +144,26 @@
                if(index === 0) rdo.checked = true;
                lbl.appendChild(rdo);
                lbl.append(p);
+
+               const delBtn = document.createElement('span');
+               delBtn.textContent = ' 🗑️';
+               delBtn.style.color = '#ff4d4f';
+               delBtn.style.marginLeft = '6px';
+               delBtn.style.cursor = 'pointer';
+               delBtn.title = 'Delete Profile Environment';
+               delBtn.onclick = async (e) => {
+                  e.preventDefault(); 
+                  if (confirm(`Are you sure you want to delete this website profile environment: ${p}?`)) {
+                     const success = await ipcRenderer.invoke('delete-profile', p);
+                     if (success) {
+                        loadProfiles();
+                     } else {
+                        alert('Failed to delete the profile environment (it might be in use).');
+                     }
+                  }
+               };
+               lbl.appendChild(delBtn);
+
                container.appendChild(lbl);
             });
          }
