@@ -9,8 +9,19 @@ process.env.PLAYWRIGHT_BROWSERS_PATH = '0';
 
 let mainWindow;
 const trajectoriesDir = path.join(app.getPath('userData'), 'trajectories');
-const profileDir = path.join(app.getPath('userData'), 'chrome_profile');
+const defaultProfileDir = path.join(app.getPath('userData'), 'chrome_profile');
 const settingsFile = path.join(app.getPath('userData'), 'auto_settings.json');
+
+function getProfileDir(urlStr) {
+  try {
+    if (!urlStr) return defaultProfileDir;
+    const urlObj = new URL(urlStr.startsWith('http') ? urlStr : 'https://' + urlStr);
+    const domain = urlObj.hostname.replace(/[^a-zA-Z0-9]/g, '_');
+    return path.join(app.getPath('userData'), `profile_${domain}`);
+  } catch (e) {
+    return defaultProfileDir;
+  }
+}
 
 if (!fs.existsSync(trajectoriesDir)) {
   fs.mkdirSync(trajectoriesDir, { recursive: true });
@@ -65,8 +76,11 @@ ipcMain.handle('check-initial-state', () => {
   let trajectoriesExist = false;
   let lastTrajectory = null;
 
-  if (fs.existsSync(profileDir) && fs.readdirSync(profileDir).length > 0) {
-    profileExists = true;
+  const userDataPath = app.getPath('userData');
+  if (fs.existsSync(userDataPath)) {
+    const hasProfiles = fs.readdirSync(userDataPath).some(f => f.startsWith('profile_') || f === 'chrome_profile');
+    if (hasProfiles) profileExists = true;
+  }
   }
   if (fs.existsSync(trajectoriesDir)) {
     const files = fs.readdirSync(trajectoriesDir).filter(f => f.endsWith('.json'));
@@ -102,8 +116,9 @@ ipcMain.handle('save-settings', (event, s) => {
 // ==== 1. Init (Login phase) ====
 ipcMain.handle('init-profile', async (event, startUrl) => {
   try {
-    const context = await chromium.launchPersistentContext(profileDir, {
-      headless: false, channel: 'chrome', viewport: null,
+    const pDir = getProfileDir(startUrl);
+    const context = await chromium.launchPersistentContext(pDir, {
+      headless: false, channel: 'chrome', viewport: { width: 1280, height: 800 },
       args: ['--disable-blink-features=AutomationControlled', '--disable-features=IsolateOrigins,site-per-process', '--disable-infobars', '--no-sandbox', '--disable-setuid-sandbox'],
       ignoreDefaultArgs: ['--enable-automation']
     });
@@ -131,7 +146,8 @@ ipcMain.handle('init-profile', async (event, startUrl) => {
 // ==== 2. Record ====
 ipcMain.handle('record', async (event, startUrl) => {
   try {
-    const context = await chromium.launchPersistentContext(profileDir, {
+    const pDir = getProfileDir(startUrl);
+    const context = await chromium.launchPersistentContext(pDir, {
       headless: false, channel: 'chrome', viewport: { width: 1280, height: 800 },
       args: ['--disable-blink-features=AutomationControlled', '--disable-features=IsolateOrigins,site-per-process', '--disable-infobars', '--no-sandbox'],
       ignoreDefaultArgs: ['--enable-automation']
@@ -223,8 +239,11 @@ ipcMain.handle('replay', async () => {
 
     sendLog(`Starting replay manually: ${path.basename(trajectoryFile)}`);
     
+    const data = JSON.parse(fs.readFileSync(trajectoryFile, 'utf-8'));
+    const pDir = getProfileDir(data.url);
+
     // Manual replay manages its own context lifecycle
-    const context = await chromium.launchPersistentContext(profileDir, {
+    const context = await chromium.launchPersistentContext(pDir, {
       headless: false, channel: 'chrome', 
       viewport: { width: 1280, height: 800 },
       args: ['--disable-blink-features=AutomationControlled', '--disable-features=IsolateOrigins,site-per-process', '--disable-infobars', '--no-sandbox'],
@@ -232,7 +251,6 @@ ipcMain.handle('replay', async () => {
     });
     
     const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
-    const data = JSON.parse(fs.readFileSync(trajectoryFile, 'utf-8'));
     
     await page.addInitScript(() => { window.addEventListener('DOMContentLoaded', () => {}); });
     await page.goto(data.url, { waitUntil: 'load' }).catch(()=>{});
@@ -347,9 +365,10 @@ async function runAutoPlayLoop(trajectoryFile, durationMins) {
     let context;
     try {
         const data = JSON.parse(fs.readFileSync(trajectoryFile, 'utf-8'));
+        const pDir = getProfileDir(data.url);
         
         // Single browser launch for the entire autoplay duration
-        context = await chromium.launchPersistentContext(profileDir, {
+        context = await chromium.launchPersistentContext(pDir, {
           headless: false, channel: 'chrome', viewport: data.viewport || { width: 1280, height: 800 },
           args: ['--disable-blink-features=AutomationControlled', '--disable-features=IsolateOrigins,site-per-process', '--disable-infobars', '--no-sandbox'],
           ignoreDefaultArgs: ['--enable-automation']
